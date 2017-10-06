@@ -16,6 +16,14 @@
         
         https://automys.com/library/asset/scheduled-virtual-machine-shutdown-startup-microsoft-azure
 
+        CRB Changes:
+        Added option to specify a timezone in the schedule (also takes into account DST!). format is:
+        TimeZone | <schedule as normal> 
+        TimeZone needs to be interpreted by: Get-TimeZone -Id TimeZone. For a list, see Get-TimeZone -ListAvailable
+
+        example:
+        AUS Eastern Standard Time|9:00pm -> 7:00am, Saturday, Sunday      will run in the AU time
+
     .PARAMETER AzureCredentialName
         The name of the PowerShell credential asset in the Automation account that contains username and password
         for the account used to connect to target Azure subscription. This user must be configured as co-administrator and owner
@@ -57,13 +65,21 @@ param(
 
 $VERSION = "2.0.2"
 
+#BEGIN CRB CHANGES
+function GetLocalisedTime ([DateTime] $Date, [TimeZoneInfo] $TimeZone)
+{
+    if($TimeZone -eq $null) {return $Date}
+    return ($Date.Add($TimeZone.GetUtcOffset($Date)))
+}
+
 # Define function to check current time against specified range
-function CheckScheduleEntry ([string]$TimeRange)
+function CheckScheduleEntry ([string]$TimeRange, [TimeZoneInfo] $TimeZone)
 {	
 	# Initialize variables
 	$rangeStart, $rangeEnd, $parsedDay = $null
-	$currentTime = (Get-Date).ToUniversalTime()
-    $midnight = $currentTime.AddDays(1).Date	        
+	$currentTime = GetLocalisedTime -Date (Get-Date).ToUniversalTime() -TimeZone $TimeZone
+#END CRB CHANGES
+	$midnight = $currentTime.AddDays(1).Date	        
 
 	try
 	{
@@ -102,9 +118,11 @@ function CheckScheduleEntry ([string]$TimeRange)
 	        # If specified as day of week, check if today
 	        if([System.DayOfWeek].GetEnumValues() -contains $TimeRange)
 	        {
-	            if($TimeRange -eq (Get-Date).DayOfWeek)
+#BEGIN CRB CHANGES
+	            if($TimeRange -eq ($currentTime).DayOfWeek)
 	            {
-	                $parsedDay = Get-Date "00:00"
+	                $parsedDay = $currentTime.Date
+#END CRB CHANGES
 	            }
 	            else
 	            {
@@ -402,7 +420,29 @@ try
             Write-Output "[$($vm.Name)]: Failed to get tagged schedule for virtual machine. Skipping this VM."
             continue
         }
+#BEGIN CRB CHANGES
+        $timeZone = $null
+        if ($schedule -like "*|*") 
+        {
+            $timeZoneComponents = @($schedule.Split('|') | foreach {$_.Trim()})
+            if ($timeZoneComponents.Count -eq 2) 
+            {
+                $timeZone = Get-TimeZone -Id $timeZoneComponents[0] -ErrorAction SilentlyContinue
+                if($timeZone -eq $null)
+                {
+                    Write-Output "[$($vm.Name)]: '$($timeZoneComponents[0])' is not a valid timezone. Skipping this VM."
+                    continue
+                }
+                $schedule = $timeZoneComponents[1]
+            }
+            else
+            {
+                Write-Output "[$($vm.Name)]: '$schedule' is in a bad format. Expecting either TimeZone|Schedulelist or Schedulelist. Skipping this VM."
+                continue
+            }
 
+        }
+#END CRB CHANGES
         # Parse the ranges in the Tag value. Expects a string of comma-separated time ranges, or a single time range
 		$timeRangeList = @($schedule -split "," | foreach {$_.Trim()})
 	    
@@ -411,8 +451,10 @@ try
         $matchedSchedule = $null
 		foreach($entry in $timeRangeList)
 		{
-		    if((CheckScheduleEntry -TimeRange $entry) -eq $true)
+#BEGIN CRB CHANGES
+		    if((CheckScheduleEntry -TimeRange $entry -TimeZone $timeZone) -eq $true)
 		    {
+#END CRB CHANGES
 		        $scheduleMatched = $true
                 $matchedSchedule = $entry
 		        break
